@@ -34,40 +34,55 @@ const globalMcpServer = new McpServer({
 });
 
 // 2. Register the Tool ONCE Globally
+// REPLACE your current globalMcpServer.tool schema section with this:
+
 globalMcpServer.tool(
   "startup_analysis",
   "Analyze a startup idea and return investment-grade intelligence",
-  // Modify this section in your mcp-server.js to make it more resilient to LLM parsing:
-{
-  startup_idea: z.string().min(5), // Lowered from 20 to catch shorter test inputs
-  target_market: z.string().default("General Public"), // Default value prevents 400 if omitted
-  founder_context: z.string().default(""), // Use explicit string default instead of .optional()
-  stage: z.string().default("Idea"),
-  industry: z.string().default("Technology"), // Use explicit string default instead of .optional()
-  geography: z.string().default("Global"),
-}
+  {
+    // Flattened constraints to prevent Vertex AI parser from throwing a 400
+    startup_idea: z.string(), 
+    target_market: z.string(),
+    founder_context: z.string().default(""), // Use a safe fallback instead of .optional()
+    stage: z.string().default("Idea"),
+    industry: z.string().default("General"),  // Use a safe fallback instead of .optional()
+    geography: z.string().default("Global"),
+  },
   async (params) => {
     try {
+      // Input sanitization guard to keep code safe without crashing the schema parser
+      if (!params.startup_idea || params.startup_idea.length < 5) {
+        return {
+          content: [{ type: "text", text: "Error: The startup idea prompt must provide descriptive details." }],
+          isError: true
+        };
+      }
+      if (!params.target_market) {
+        return {
+          content: [{ type: "text", text: "Error: Please specify a target market for evaluation." }],
+          isError: true
+        };
+      }
+
       const response = await axios.post(
         VENTURE_INTEL_URL,
         {
           startup_idea: params.startup_idea,
           target_market: params.target_market,
-          founder_context: params.founder_context || "",
+          founder_context: params.founder_context,
           stage: params.stage,
-          industry: params.industry || "",
+          industry: params.industry,
           geography: params.geography,
         },
-        { timeout: 180000 } // 3 minutes
+        { timeout: 180000 }
       );
+      
       return {
         content: [{ type: "text", text: JSON.stringify(response.data) }],
       };
     } catch (error) {
       return {
-        content: [
-          { type: "text", text: `Analysis failed: ${error.message}` },
-        ],
+        content: [{ type: "text", text: `Analysis failed: ${error.message}` }],
         isError: true,
       };
     }
