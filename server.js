@@ -103,14 +103,20 @@ app.post("/venture_intel_analyze", async (req, res) => {
       process.env.VENTURE_INTEL_ANALYZE_URL,
       req.body
     );
-
     res.json(response.data);
   } catch (err) {
     console.error(err.message);
 
+    // Show upstream status + URL for easier debugging
+    const upstreamStatus = err.response?.status;
+    const upstreamData = err.response?.data;
+
     res.status(500).json({
       error: "venture_intel_analyze_failed",
       details: err.message,
+      upstream_status: upstreamStatus,       // e.g. 404
+      upstream_response: upstreamData,        // actual error from target
+      target_url: process.env.VENTURE_INTEL_ANALYZE_URL ?? "NOT SET", // reveals missing var
     });
   }
 });
