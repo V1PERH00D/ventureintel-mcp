@@ -1,167 +1,111 @@
+import { config } from "dotenv";
+config(); // Load .env
+
 import express from "express";
-import cors from "cors";
-import dotenv from "dotenv";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
+import { z } from "zod";
 import axios from "axios";
 
-dotenv.config();
+const VENTURE_INTEL_URL = process.env.VENTURE_INTEL_ANALYZE_URL;
+if (!VENTURE_INTEL_URL) {
+  console.error("VENTURE_INTEL_ANALYZE_URL missing");
+  process.exit(1);
+}
 
+// Create the Express app using the official helper
 const app = express();
-
-app.use(cors());
+// Note: createMcpExpressApp() is not directly exported; we'll mimic its behavior.
+// Ensure JSON parsing and CORS are enabled manually.
 app.use(express.json());
-
-/* ==========================================
-   STARTUP CREATE
-   ========================================== */
-app.post("/startup_create", async (req, res) => {
-  try {
-    const response = await axios.post(
-      process.env.STARTUP_CREATE_URL,
-      req.body
-    );
-    res.json(response.data);
-  } catch (err) {
-    console.error(err.message);
-    res.status(500).json({
-      error: "startup_create_failed",
-      details: err.message,
-    });
+app.use((req, res, next) => {
+  res.header("Access-Control-Allow-Origin", "*");
+  res.header("Access-Control-Allow-Headers", "Content-Type, Mcp-Session-Id");
+  if (req.method === "OPTIONS") {
+    return res.sendStatus(200);
   }
+  next();
 });
 
-/* ==========================================
-   WAR ROOM ENGINE
-   ========================================== */
-app.post("/war_room_engine", async (req, res) => {
-  try {
-    const response = await axios.post(
-      process.env.WAR_ROOM_URL,
-      req.body
-    );
-    res.json(response.data);
-  } catch (err) {
-    console.error(err.message);
-    res.status(500).json({
-      error: "war_room_engine_failed",
-      details: err.message,
-    });
-  }
-});
-
-/* ==========================================
-   VENTURE INTEL
-   ========================================== */
-app.post("/venture_intel_pipeline", async (req, res) => {
-  try {
-    const response = await axios.post(
-      process.env.VENTURE_INTEL_URL,
-      req.body
-    );
-    res.json(response.data);
-  } catch (err) {
-    console.error(err.message);
-    res.status(500).json({
-      error: "venture_intel_failed",
-      details: err.message,
-    });
-  }
-});
-
-/* ==========================================
-   TAVILY DEEP MARKET SEARCH (ADDED)
-   ========================================== */
-app.post("/search", async (req, res) => {
-  const { query } = req.body;
-
-  if (!query) {
-    return res.status(400).json({ error: "Missing required parameter: query" });
-  }
-
-  try {
-    const response = await axios.post("https://api.tavily.com/search", {
-      api_key: process.env.TAVILY_API_KEY,
-      query: query,
-      search_depth: "basic",
-      max_results: 5,
-    });
-    
-    res.json(response.data);
-  } catch (err) {
-    console.error("Tavily Search Failed:", err.message);
-    res.status(500).json({
-      error: "market_search_failed",
-      details: err.response?.data || err.message,
-    });
-  }
-});
-/* ==========================================
-   VENTURE INTEL ANALYZE
-   ========================================== */
-app.post("/venture_intel_analyze", async (req, res) => {
-  try {
-    const response = await axios.post(
-      process.env.VENTURE_INTEL_ANALYZE_URL,
-      req.body
-    );
-    res.json(response.data);
-  } catch (err) {
-    console.error(err.message);
-
-    // Show upstream status + URL for easier debugging
-    const upstreamStatus = err.response?.status;
-    const upstreamData = err.response?.data;
-
-    res.status(500).json({
-      error: "venture_intel_analyze_failed",
-      details: err.message,
-      upstream_status: upstreamStatus,       // e.g. 404
-      upstream_response: upstreamData,        // actual error from target
-      target_url: process.env.VENTURE_INTEL_ANALYZE_URL ?? "NOT SET", // reveals missing var
-    });
-  }
-});
-
-/* ==========================================
-   VENTURE INTEL CHAT
-   ========================================== */
-app.post("/venture_intel_chat", async (req, res) => {
-  try {
-    const response = await axios.post(
-      process.env.VENTURE_INTEL_CHAT_URL,
-      req.body
-    );
-
-    res.json(response.data);
-  } catch (err) {
-    console.error(err.message);
-
-    res.status(500).json({
-      error: "venture_intel_chat_failed",
-      details: err.message,
-    });
-  }
-});
-
-/* ==========================================
-   HEALTH CHECK
-   ========================================== */
+// Health check – REQUIRED for Vertex connectivity probe
 app.get("/", (req, res) => {
-  res.json({
-    status: "ok",
-    service: "ventureintel-mcp",
-    integratedRoutes: [
-  "/startup_create",
-  "/war_room_engine",
-  "/venture_intel_pipeline",
-  "/venture_intel_analyze",
-  "/venture_intel_chat",
-  "/search"
-]
+  res.status(200).send("MCP server running");
+});
+
+// Store transports by session ID
+const transports = {};
+
+// SSE endpoint – initiates the stream
+app.get("/sse", async (req, res) => {
+  const transport = new SSEServerTransport("/messages", res);
+  const sessionId = transport.sessionId;
+  transports[sessionId] = transport;
+
+  // Create the MCP server on demand for this session
+  const server = new McpServer({
+    name: "venture-intel",
+    version: "1.0.0",
+  });
+
+  // Define the tool
+  server.tool(
+    "startup_analysis",
+    "Analyze a startup idea and return investment-grade intelligence",
+    {
+      startup_idea: z.string().min(20),
+      target_market: z.string().min(1),
+      founder_context: z.string().optional(),
+      stage: z.string().default("Idea"),
+      industry: z.string().optional(),
+      geography: z.string().default("Global"),
+    },
+    async (params) => {
+      try {
+        const response = await axios.post(
+          VENTURE_INTEL_URL,
+          {
+            startup_idea: params.startup_idea,
+            target_market: params.target_market,
+            founder_context: params.founder_context || "",
+            stage: params.stage,
+            industry: params.industry || "",
+            geography: params.geography,
+          },
+          { timeout: 180000 } // 3 minutes
+        );
+        return {
+          content: [{ type: "text", text: JSON.stringify(response.data) }],
+        };
+      } catch (error) {
+        return {
+          content: [
+            { type: "text", text: `Analysis failed: ${error.message}` },
+          ],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  // Connect the transport to the server
+  await server.connect(transport);
+
+  res.on("close", () => {
+    delete transports[sessionId];
+    server.close().catch(console.error);
   });
 });
 
-const PORT = 3001;
+// POST endpoint for client-to-server messages
+app.post("/messages", async (req, res) => {
+  const sessionId = req.headers["mcp-session-id"];
+  if (!sessionId || !transports[sessionId]) {
+    return res.status(400).json({ error: "Invalid or missing session" });
+  }
+  await transports[sessionId].handlePostMessage(req, res);
+});
 
+const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`MCP bridge running on port ${PORT}`);
+  console.log(`MCP server listening on port ${PORT}`);
 });
