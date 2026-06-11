@@ -15,6 +15,7 @@ app.use((req, res, next) => {
   next();
 });
 
+
 /* ==========================================================
    CREATE MCP SERVER
    ========================================================== */
@@ -153,6 +154,13 @@ app.post("/mcp", async (req, res) => {
 /* ==========================================================
    OPTIONAL GET SUPPORT
    ========================================================== */
+
+app.get("/.well-known/agent.json", (req, res) => {
+  console.log("WELL KNOWN HIT");
+  res.json({
+    name: "venture-intel"
+  });
+});
 
 app.get("/mcp", async (req, res) => {
   const sessionId = req.headers["mcp-session-id"];
