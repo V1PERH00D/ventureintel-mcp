@@ -1,111 +1,97 @@
 import { config } from "dotenv";
-config(); // Load .env
+config();
 
 import express from "express";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { createMcpExpressApp } from "@modelcontextprotocol/sdk/server/streamableHttp.js"; // ← critical
 import { z } from "zod";
 import axios from "axios";
+import crypto from "crypto";
 
 const VENTURE_INTEL_URL = process.env.VENTURE_INTEL_ANALYZE_URL;
 if (!VENTURE_INTEL_URL) {
-  console.error("VENTURE_INTEL_ANALYZE_URL missing");
+  console.error("VENTURE_INTEL_ANALYZE_URL missing in .env");
   process.exit(1);
 }
 
-// Create the Express app using the official helper
-const app = express();
-// Note: createMcpExpressApp() is not directly exported; we'll mimic its behavior.
-// Ensure JSON parsing and CORS are enabled manually.
-app.use(express.json());
-app.use((req, res, next) => {
-  res.header("Access-Control-Allow-Origin", "*");
-  res.header("Access-Control-Allow-Headers", "Content-Type, Mcp-Session-Id");
-  if (req.method === "OPTIONS") {
-    return res.sendStatus(200);
-  }
-  next();
-});
+// Use the official Express app builder
+const app = createMcpExpressApp();
 
-// Health check – REQUIRED for Vertex connectivity probe
-app.get("/", (req, res) => {
-  res.status(200).send("MCP server running");
-});
-
-// Store transports by session ID
+// Map of transports, keyed by sessionId
 const transports = {};
 
-// SSE endpoint – initiates the stream
-app.get("/sse", async (req, res) => {
-  const transport = new SSEServerTransport("/messages", res);
-  const sessionId = transport.sessionId;
-  transports[sessionId] = transport;
-
-  // Create the MCP server on demand for this session
+function createServer() {
   const server = new McpServer({
     name: "venture-intel",
     version: "1.0.0",
   });
 
-  // Define the tool
   server.tool(
     "startup_analysis",
-    "Analyze a startup idea and return investment-grade intelligence",
+    "Analyze a startup idea and return investment-grade intelligence with market sizing, competitive analysis, risk assessment, and execution playbook",
     {
       startup_idea: z.string().min(20),
       target_market: z.string().min(1),
-      founder_context: z.string().optional(),
+      founder_context: z.string().optional().default(""),
       stage: z.string().default("Idea"),
-      industry: z.string().optional(),
+      industry: z.string().optional().default(""),
       geography: z.string().default("Global"),
     },
     async (params) => {
+      console.log(`Analysis started: ${params.startup_idea.slice(0, 50)}...`);
       try {
-        const response = await axios.post(
-          VENTURE_INTEL_URL,
-          {
-            startup_idea: params.startup_idea,
-            target_market: params.target_market,
-            founder_context: params.founder_context || "",
-            stage: params.stage,
-            industry: params.industry || "",
-            geography: params.geography,
-          },
-          { timeout: 180000 } // 3 minutes
-        );
-        return {
-          content: [{ type: "text", text: JSON.stringify(response.data) }],
-        };
+        const response = await axios.post(VENTURE_INTEL_URL, params, { timeout: 180000 });
+        console.log("Analysis succeeded");
+        return { content: [{ type: "text", text: JSON.stringify(response.data) }] };
       } catch (error) {
+        console.error("Analysis failed:", error.message);
         return {
-          content: [
-            { type: "text", text: `Analysis failed: ${error.message}` },
-          ],
+          content: [{ type: "text", text: `Analysis error: ${error.message}` }],
           isError: true,
         };
       }
     }
   );
 
-  // Connect the transport to the server
-  await server.connect(transport);
+  return server;
+}
 
-  res.on("close", () => {
-    delete transports[sessionId];
-    server.close().catch(console.error);
-  });
-});
-
-// POST endpoint for client-to-server messages
-app.post("/messages", async (req, res) => {
+app.all("/mcp", async (req, res) => {
   const sessionId = req.headers["mcp-session-id"];
-  if (!sessionId || !transports[sessionId]) {
-    return res.status(400).json({ error: "Invalid or missing session" });
+
+  if (sessionId && transports[sessionId]) {
+    // Existing session – reuse transport
+    await transports[sessionId].handleRequest(req, res);
+  } else if (!sessionId) {
+    // New session – first request must be an initialize
+    const transport = new StreamableHTTPServerTransport({
+      sessionIdGenerator: () => crypto.randomUUID(),
+    });
+
+    const server = createServer();
+    await server.connect(transport);
+
+    // Handle the request (sets session header automatically)
+    await transport.handleRequest(req, res);
+
+    // Store transport for later use
+    transports[transport.sessionId] = transport;
+
+    transport.onclose = () => {
+      delete transports[transport.sessionId];
+      server.close().catch(console.error);
+    };
+  } else {
+    // Session ID provided but not found – invalid
+    res.status(400).json({ error: "Invalid session" });
   }
-  await transports[sessionId].handlePostMessage(req, res);
 });
+
+// Health check (required by Vertex / Render)
+app.get("/", (req, res) => res.send("OK"));
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`MCP server listening on port ${PORT}`);
+  console.log(`MCP server (StreamableHTTP) running on port ${PORT}`);
 });
