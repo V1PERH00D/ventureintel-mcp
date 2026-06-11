@@ -9,6 +9,11 @@ import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 
 const app = express();
 app.use(express.json());
+app.use((req, res, next) => {
+  console.log("REQUEST:", req.method, req.url);
+  console.log("HEADERS:", JSON.stringify(req.headers, null, 2));
+  next();
+});
 
 /* ==========================================================
    CREATE MCP SERVER
