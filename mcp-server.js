@@ -13,94 +13,95 @@ if (!VENTURE_INTEL_URL) {
   process.exit(1);
 }
 
-// Create the Express app using the official helper
 const app = express();
-// Note: createMcpExpressApp() is not directly exported; we'll mimic its behavior.
-// Ensure JSON parsing and CORS are enabled manually.
 app.use(express.json());
+
+// Enable broad CORS handling for Vertex AI
 app.use((req, res, next) => {
   res.header("Access-Control-Allow-Origin", "*");
-  res.header("Access-Control-Allow-Headers", "Content-Type, Mcp-Session-Id");
+  res.header("Access-Control-Allow-Headers", "Content-Type, X-Session-Id, Mcp-Session-Id");
+  res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
   if (req.method === "OPTIONS") {
     return res.sendStatus(200);
   }
   next();
 });
 
-// Health check – REQUIRED for Vertex connectivity probe
+// 1. Create ONE Global MCP Server Instance
+const globalMcpServer = new McpServer({
+  name: "venture-intel",
+  version: "1.0.0",
+});
+
+// 2. Register the Tool ONCE Globally
+globalMcpServer.tool(
+  "startup_analysis",
+  "Analyze a startup idea and return investment-grade intelligence",
+  {
+    startup_idea: z.string().min(20),
+    target_market: z.string().min(1),
+    founder_context: z.string().optional(),
+    stage: z.string().default("Idea"),
+    industry: z.string().optional(),
+    geography: z.string().default("Global"),
+  },
+  async (params) => {
+    try {
+      const response = await axios.post(
+        VENTURE_INTEL_URL,
+        {
+          startup_idea: params.startup_idea,
+          target_market: params.target_market,
+          founder_context: params.founder_context || "",
+          stage: params.stage,
+          industry: params.industry || "",
+          geography: params.geography,
+        },
+        { timeout: 180000 } // 3 minutes
+      );
+      return {
+        content: [{ type: "text", text: JSON.stringify(response.data) }],
+      };
+    } catch (error) {
+      return {
+        content: [
+          { type: "text", text: `Analysis failed: ${error.message}` },
+        ],
+        isError: true,
+      };
+    }
+  }
+);
+
+// Track global transports
+const transports = {};
+
+// Health check – KEEP THIS! Vertex uses it to verify the host is alive
 app.get("/", (req, res) => {
   res.status(200).send("MCP server running");
 });
 
-// Store transports by session ID
-const transports = {};
-
-// SSE endpoint – initiates the stream
+// SSE endpoint – connects the transport to the global server
 app.get("/sse", async (req, res) => {
   const transport = new SSEServerTransport("/messages", res);
   const sessionId = transport.sessionId;
   transports[sessionId] = transport;
 
-  // Create the MCP server on demand for this session
-  const server = new McpServer({
-    name: "venture-intel",
-    version: "1.0.0",
-  });
-
-  // Define the tool
-  server.tool(
-    "startup_analysis",
-    "Analyze a startup idea and return investment-grade intelligence",
-    {
-      startup_idea: z.string().min(20),
-      target_market: z.string().min(1),
-      founder_context: z.string().optional(),
-      stage: z.string().default("Idea"),
-      industry: z.string().optional(),
-      geography: z.string().default("Global"),
-    },
-    async (params) => {
-      try {
-        const response = await axios.post(
-          VENTURE_INTEL_URL,
-          {
-            startup_idea: params.startup_idea,
-            target_market: params.target_market,
-            founder_context: params.founder_context || "",
-            stage: params.stage,
-            industry: params.industry || "",
-            geography: params.geography,
-          },
-          { timeout: 180000 } // 3 minutes
-        );
-        return {
-          content: [{ type: "text", text: JSON.stringify(response.data) }],
-        };
-      } catch (error) {
-        return {
-          content: [
-            { type: "text", text: `Analysis failed: ${error.message}` },
-          ],
-          isError: true,
-        };
-      }
-    }
-  );
-
-  // Connect the transport to the server
-  await server.connect(transport);
+  // Connect this new transport stream to our single global server instance
+  await globalMcpServer.connect(transport);
 
   res.on("close", () => {
     delete transports[sessionId];
-    server.close().catch(console.error);
   });
 });
 
-// POST endpoint for client-to-server messages
+// POST endpoint for client messages
 app.post("/messages", async (req, res) => {
-  const sessionId = req.headers["mcp-session-id"];
+  // Extract session ID safely (Vertex may use varying casings)
+  const sessionId = req.headers["mcp-session-id"] || req.headers["mcp-session-id".toLowerCase()];
+  
   if (!sessionId || !transports[sessionId]) {
-    return res.status(400).json({ error: "Invalid or missing session" });
+    return res.status(400).json({ error: "Invalid or expired MCP session" });
   }
   await transports[sessionId].handlePostMessage(req, res);
 });
