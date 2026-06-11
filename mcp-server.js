@@ -37,14 +37,15 @@ const globalMcpServer = new McpServer({
 globalMcpServer.tool(
   "startup_analysis",
   "Analyze a startup idea and return investment-grade intelligence",
-  {
-    startup_idea: z.string().min(20),
-    target_market: z.string().min(1),
-    founder_context: z.string().optional(),
-    stage: z.string().default("Idea"),
-    industry: z.string().optional(),
-    geography: z.string().default("Global"),
-  },
+  // Modify this section in your mcp-server.js to make it more resilient to LLM parsing:
+{
+  startup_idea: z.string().min(5), // Lowered from 20 to catch shorter test inputs
+  target_market: z.string().default("General Public"), // Default value prevents 400 if omitted
+  founder_context: z.string().default(""), // Use explicit string default instead of .optional()
+  stage: z.string().default("Idea"),
+  industry: z.string().default("Technology"), // Use explicit string default instead of .optional()
+  geography: z.string().default("Global"),
+}
   async (params) => {
     try {
       const response = await axios.post(
